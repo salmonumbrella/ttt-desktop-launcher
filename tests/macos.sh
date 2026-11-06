@@ -7,10 +7,29 @@ fixture=''
 cp -R "$root/desktop-launcher-macos" "$tmp/plugin"
 script=$tmp/plugin/launcher.sh
 trap '[ -z "$fixture" ] || { kill "$fixture" 2>/dev/null || true; wait "$fixture" 2>/dev/null || true; }; rm -rf "$tmp"' EXIT
+# Optional native JXA gate; replace UI activation in a temporary source copy.
+if [ "${TEST_NATIVE_JXA:-}" = 1 ]; then
+    if [ "$(uname)" != Darwin ]; then echo 'native JXA: skipped (requires macOS)'; exit; fi
+    mkdir -p "$tmp/native-root" "$tmp/bin" "$tmp/home"
+    cp -R "$root/desktop-launcher-macos" "$tmp/native-root/desktop-launcher-macos"
+    python3 - "$tmp" <<'PY_NATIVE'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+p = root / 'native-root/desktop-launcher-macos/services.js'
+source = p.read_text().replace('/usr/bin/open', str(root / 'bin/open'))
+source = source.replace('$.NSRunningApplication.runningApplicationWithProcessIdentifier(pid)', 'null')
+source = source.replace('$.NSRunningApplication.runningApplicationsWithBundleIdentifier($(ids[argv[2]]))', '({count:0})')
+p.write_text(source)
+PY_NATIVE
+    env -u CODEX_HOME -u CLAUDE_CONFIG_DIR -u PI_CODING_AGENT_DIR -u HERDR_APP_HOME -u HC_SESSION -u HC_TERMINAL_ID HOME="$tmp/home" PATH="$tmp/bin:$PATH" python3 "$root/tests/macos-herdr.py" "$tmp/native-root" "$tmp"
+    exit
+fi
 export TEST_BRIDGE="$tmp/bridge.js" TEST_STATE="$tmp/state.json" TEST_LOG="$tmp/events"
 mkdir -p "$tmp/bin" "$tmp/home" "$tmp/config" "$tmp/temp with spaces"
 ln -s "$(command -v node)" "$tmp/bin/node"
 cat >"$TEST_BRIDGE" <<'STUB'
+const child = require('child_process');
 const fs = require('fs'), vm = require('vm'), assert = require('assert'), path = require('path');
 const [script, ...args] = process.argv.slice(4);
 const state = fs.existsSync(process.env.TEST_STATE) ? JSON.parse(fs.readFileSync(process.env.TEST_STATE)) : {};
@@ -19,7 +38,28 @@ const wrap = js => ({js, get stringByStandardizingPath() {return wrap(path.norma
     get stringByResolvingSymlinksInPath() {return wrap(fs.existsSync(js) ? fs.realpathSync(js) : path.resolve(js));},
     get stringByDeletingLastPathComponent() {return wrap(path.dirname(js));}});
 const $ = x => wrap(x);
-$.NSFileManager = {defaultManager:{currentDirectoryPath:wrap(process.cwd()), fileExistsAtPath:p=>fs.existsSync(p.js)}};
+$.NSFileManager = {defaultManager:{currentDirectoryPath:wrap(process.cwd()), fileExistsAtPath:p=>fs.existsSync(p.js),
+    createFileAtPathContentsAttributes(p) {fs.writeFileSync(p.js,''); return true;},
+    removeItemAtPathError(p) {fs.rmSync(p.js,{force:true}); return true;}}};
+$.NSData = {data:{}};
+$.NSTemporaryDirectory = () => wrap(process.env.TMPDIR);
+$.NSProcessInfo = {processInfo:{get globallyUniqueString(){return wrap(require('crypto').randomUUID());}}};
+$.NSFileHandle = {fileHandleForWritingAtPath:p=>({path:p.js, closeFile(){}}), fileHandleWithNullDevice:{}};
+$.NSThread = {sleepForTimeInterval:s=>child.spawnSync('/bin/sleep',[String(s)])};
+$.NSTask = {alloc:{get init() {return {
+    isRunning:false, terminationStatus:0,
+    get launch() {
+        let exe=this.launchPath.js, args=this.arguments.js;
+        if (exe==='/usr/bin/open') exe=process.env.HOME+'/../bin/open';
+        let result;
+        if (exe==='/bin/ps' && process.env.TEST_ANCESTRY) {
+            const ancestry=Object.fromEntries(process.env.TEST_ANCESTRY.split(',').map(p=>p.split(':')));
+            result={status:0,stdout:ancestry[args[args.length-1]] || '1'};
+        } else result=child.spawnSync(exe,args,{encoding:'utf8',timeout:500,killSignal:'SIGKILL'});
+        this.terminationStatus=result.status === null ? 124 : result.status;
+        if (this.standardOutput.path) fs.writeFileSync(this.standardOutput.path,result.stdout || '');
+    }, get waitUntilExit(){}, get terminate(){}
+};}}};
 $.NSHomeDirectory = () => wrap(process.env.HOME);
 $.NSUTF8StringEncoding = 4; $.kLSRolesAll = -1;
 $.NSString = {stringWithContentsOfFileEncodingError(p) {try {return wrap(fs.readFileSync(p.js, 'utf8'));} catch (_) {return null;}}};
@@ -120,6 +160,11 @@ applet=$res/script.applescript
 fail() { echo "FAIL: $*" >&2; exit 1; }
 run() { env -u CODEX_HOME -u CLAUDE_CONFIG_DIR -u PI_CODING_AGENT_DIR -u HERDR_APP_HOME -u HC_SESSION -u HC_TERMINAL_ID -u HERDR_ENV -u TTT_LAUNCHER_TERMINAL -u TTT_CONFIG_DIR -u KITTY_WINDOW_ID -u WEZTERM_PANE -u ALACRITTY_WINDOW_ID -u GHOSTTY_RESOURCES_DIR -u TERM_PROGRAM HOME="$tmp/home" PATH="$tmp/bin:$PATH" TMPDIR="$tmp/temp with spaces/" "$@"; }
 service() { run osascript -l JavaScript "$root/desktop-launcher-macos/services.js" "$@"; }
+if [ "${TEST_ONLY_HERDR:-}" = 1 ]; then
+    run python3 "$root/tests/macos-herdr.py" "$root" "$tmp"
+    exit
+fi
+
 run sh "$script" install '/opt/my "apps"/ttt' "$tmp/config"
 grep -qF 'property tttExe : "/opt/my \"apps\"/ttt"' "$applet" || fail 'exe quoting'
 grep -qF 'tell application "Terminal"' "$applet" || fail 'terminal fallback'
@@ -249,6 +294,7 @@ grep -qx 'activate pid 42' "$TEST_LOG" || fail 'actual editor ancestry ignored'
 : >"$TEST_LOG"
 run env FOCUS_FALLBACK=1 osascript -l JavaScript "$res/services.js" focus 42 Ghostty >/dev/null
 grep -qx 'activate com.mitchellh.ghostty' "$TEST_LOG" || fail 'Herdr host fallback not activated'
+run python3 "$root/tests/macos-herdr.py" "$root" "$tmp"
 service documents "$root/desktop-launcher-macos/extensions.txt" >"$tmp/docs.json"
 service defaults "$root/desktop-launcher-macos/extensions.txt" >"$tmp/defaults"
 service excluded "$root/desktop-launcher-macos/extensions.txt" >"$tmp/excluded"
@@ -373,6 +419,17 @@ grep -qxF "arg=$file" "$TEST_LOG" || fail 'filename changed'
 grep -qxF "config=$tmp/config" "$TEST_LOG" || fail 'config not passed'
 run env FOCUS_FALLBACK=1 osascript -l JavaScript "$res/services.js" focus "$$" Ghostty >/dev/null
 grep -qx 'activate com.mitchellh.ghostty' "$TEST_LOG" || fail 'terminal fallback not activated'
+# Successful delivery stays successful when focusing its Herdr terminal fails.
+: >"$TEST_LOG"
+: >"$tmp/warm-herdr-events"
+run env HERDR_LOG="$tmp/warm-herdr-events" HERDR_STATE="$tmp/warm-herdr-state" HERDR_PIDS="$tmp/herdr-pids" FOCUS_OWNER="$$" HERDR_CASE=focus-fail sh "$res/forward.sh" "$tmp/bin/ttt" "$tmp/config" Ghostty --herdr-app "$tmp/bin/herdr-app" "$tmp/bin/hc" "$file"
+[ "$(grep -c '^config=' "$TEST_LOG")" = 1 ] || fail 'warm Herdr handoff launched twice'
+python3 - "$tmp/warm-herdr-events" <<'PY_WARM'
+import json, pathlib, sys
+calls = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+assert ['do', 'agent.focus', '{"terminal":"t22"}'] in calls, calls
+assert not any(c[:2] in [['do','tab.new'],['do','space.new']] for c in calls), calls
+PY_WARM
 : >"$TEST_LOG"
 rc=0
 run env CLIENT_FAIL=1 sh "$res/forward.sh" "$tmp/bin/ttt" "$tmp/config" Ghostty "$file" 2>"$tmp/error" || rc=$?

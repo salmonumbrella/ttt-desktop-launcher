@@ -129,7 +129,7 @@ end open
 
 on launchTTT(theItems)
 	set resources to POSIX path of (path to resource "forward.sh")
-	set forwardCmd to "/bin/sh " & quoted form of resources & " " & quoted form of tttExe & " " & quoted form of configDir & " " & quoted form of terminalApp
+	set forwardCmd to "/bin/sh " & quoted form of resources & " " & quoted form of tttExe & " " & quoted form of configDir & " " & quoted form of terminalApp & " --herdr-app " & quoted form of herdrAppExe & " " & quoted form of herdrCoreExe
 	set cmd to "env TTT_CONFIG_DIR=" & quoted form of configDir & " " & quoted form of tttExe & " --welcome"
 	set firstPath to ""
 	repeat with f in theItems

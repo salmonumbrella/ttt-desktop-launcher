@@ -33,6 +33,8 @@ On macOS, installing or repairing inside legacy herdr (`HERDR_ENV=1`, with `herd
 {"terminal":"herdr-app","fallback":"ghostty"}
 ```
 
+Herdr.app opens a tab in an explicitly local space, creating a local space when needed, even when a remote space is selected. A cold launch starts Herdr and waits up to ten seconds for its window. If it is unavailable before creation, the saved fallback opens ttt. Once creation is attempted, an error shows a notification rather than risking a duplicate editor. Subsequent Finder handoffs focus the local terminal owning the receiving editor; focus failure does not repeat delivery.
+
 The launcher reads this file from an explicit `TTT_CONFIG_DIR`, otherwise executable-adjacent `config` when it contains `settings.json`, otherwise `~/.config/ttt`. Both fields default to `auto`. `terminal` accepts `auto`, `herdr-app`, legacy `herdr`, or the six ordinary macOS terminals listed above; `fallback` accepts `auto` or an ordinary terminal. `TTT_LAUNCHER_TERMINAL` overrides the saved primary choice. Invalid configuration leaves the installed app intact. Repair snapshots the choices and CLI paths into the app; the preference file stays outside the bundle, so repairing from another terminal preserves your saved choice. Changes take effect on the next Repair.
 
 ## Safety
@@ -43,5 +45,6 @@ The scripts only touch files they created: `ttt.desktop` carries `X-TTT-Managed=
 
 ```sh
 sh tests/linux.sh
+TEST_NATIVE_JXA=1 sh tests/macos.sh # real JXA/child deadlines on macOS; fixture app/core and activation
 sh tests/macos.sh   # requires Node and Python 3; stubs macOS commands (osascript, osacompile, plutil, codesign, stat, uname), runs anywhere
 ```

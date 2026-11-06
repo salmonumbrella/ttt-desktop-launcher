@@ -34,6 +34,100 @@ function preferences(override, exe) {
         throw Error('invalid terminal or fallback in desktop-launcher.json');
     return JSON.stringify({terminal:terminal, fallback:fallback});
 }
+// Use files rather than pipes so a large snapshot cannot block a child on stdout.
+function execute(exe, args, deadline) {
+    if (!exe || Date.now() >= deadline) return null;
+    var file = $.NSTemporaryDirectory().js + 'ttt-herdr-' + $.NSProcessInfo.processInfo.globallyUniqueString.js;
+    var task = $.NSTask.alloc.init, handle;
+    try {
+        $.NSFileManager.defaultManager.createFileAtPathContentsAttributes($(file), $.NSData.data, $({NSFilePosixPermissions:384}));
+        handle = $.NSFileHandle.fileHandleForWritingAtPath($(file));
+        task.launchPath = $(exe); task.arguments = $(args);
+        task.standardOutput = handle; task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+        task.launch;
+        while (task.isRunning && Date.now() < deadline) $.NSThread.sleepForTimeInterval(0.02);
+        if (task.isRunning) {
+            // The CLI may ignore TERM; kill and reap only the child we started.
+            var killer = $.NSTask.alloc.init;
+            killer.launchPath = $('/bin/kill'); killer.arguments = $(['-KILL', String(task.processIdentifier)]);
+            killer.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
+            killer.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+            killer.launch; killer.waitUntilExit; task.waitUntilExit;
+            return null;
+        }
+        task.waitUntilExit;
+        return {status:task.terminationStatus, text:read(file)};
+    } catch (_) { return null; }
+    finally {
+        if (handle) handle.closeFile;
+        $.NSFileManager.defaultManager.removeItemAtPathError($(file), null);
+    }
+}
+function snapshot(exe, deadline) {
+    var result = execute(exe, ['ls'], Math.min(deadline, Date.now() + 1000));
+    if (!result || result.status !== 0) return null;
+    try {
+        var value = JSON.parse(result.text);
+        return Array.isArray(value.spaces) ? value.spaces : null;
+    } catch (_) { return null; }
+}
+function localSpaces(spaces) {
+    return spaces.filter(function(s) {return s.machine === null && typeof s.id === 'string' && s.id && s.id.indexOf('/') < 0;});
+}
+function herdrLaunch(exe, command, folder) {
+    var deadline = Date.now() + 10000, spaces = snapshot(exe, deadline);
+    if (!spaces) {
+        execute('/usr/bin/open', ['-a', 'Herdr'], Math.min(deadline, Date.now() + 1000));
+        while (!spaces && Date.now() < deadline) {
+            $.NSThread.sleepForTimeInterval(0.1);
+            spaces = snapshot(exe, deadline);
+        }
+    }
+    if (!spaces) return '2'; // No creation dispatched; fallback is safe.
+    var local = localSpaces(spaces), space = local.filter(function(s) {return s.active;})[0] || local[0];
+    var payload = {name:'TTT', folder:folder, argv:['/bin/sh', '-c', command]};
+    if (space) payload.space = space.id;
+    else { payload.machine = ''; payload.tab = 'TTT'; }
+    // Never retry a creation: a lost or failed reply can still mean it launched.
+    var result = execute(exe, ['do', space ? 'tab.new' : 'space.new', JSON.stringify(payload)], Date.now() + 10000);
+    if (!result || result.status !== 0) return '1';
+    try { if (JSON.parse(result.text).error) return '1'; }
+    catch (_) { return '1'; }
+    execute('/usr/bin/open', ['-a', 'Herdr'], Date.now() + 1000);
+    return '0'; // Activation failure cannot request another editor.
+}
+function ancestry(pid, deadline) {
+    var pids = [];
+    while (pid > 1 && pids.length < 64 && pids.indexOf(pid) < 0 && Date.now() < deadline) {
+        pids.push(pid);
+        var result = execute('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], deadline);
+        if (!result || result.status !== 0) break;
+        pid = Number(result.text.trim());
+    }
+    return pids;
+}
+function herdrFocus(exe, core, pids, deadline) {
+    var spaces = snapshot(exe, deadline);
+    if (!spaces) return false;
+    for (var space of localSpaces(spaces)) {
+        for (var tab of space.tabs || []) {
+            for (var terminal of tab.terminals || []) {
+                var address = terminal.terminal;
+                if (typeof address !== 'string' || !address || address.indexOf('/') >= 0) continue;
+                var result = execute(core, ['get', address, '--json'], deadline);
+                if (!result || result.status !== 0) continue;
+                try {
+                    var state = JSON.parse(result.text);
+                    if (pids.indexOf(Number(state.pid)) < 0 && pids.indexOf(Number((state.foreground || {}).pid)) < 0) continue;
+                } catch (_) { continue; }
+                execute(exe, ['do', 'agent.focus', JSON.stringify({terminal:address})], deadline);
+                execute('/usr/bin/open', ['-a', 'Herdr'], deadline);
+                return true;
+            }
+        }
+    }
+    return false;
+}
 function privateType(ext) {
     return 'io.github.simonocampo1.tttlauncher.code.' + ext.replace(/[^a-z0-9.]/g, function(c) {
         return '-' + c.charCodeAt(0).toString(16) + '-';
@@ -56,6 +150,7 @@ function typesFor(ext) {
 }
 function run(argv) {
     var mode = argv[0];
+    if (mode === 'herdr-launch') return herdrLaunch(argv[1], argv[2], argv[3]);
     if (mode === 'preferences') return preferences(argv[1], argv[2]);
     if (mode === 'preference') return JSON.parse(argv[1])[argv[2]];
     if (mode === 'herdr-pane') {
@@ -85,17 +180,16 @@ function run(argv) {
     }
     if (mode === 'absolute') return absolute(argv[1]);
     if (mode === 'focus') {
-        var app = Application.currentApplication(); app.includeStandardAdditions = true;
-        var pid = Number(argv[1]);
-        while (pid > 1) {
+        var deadline = Date.now() + 3000, pids = ancestry(Number(argv[1]), deadline);
+        if (argv[3] && argv[4] && herdrFocus(argv[3], argv[4], pids, deadline)) return 'yes';
+        for (var pid of pids) {
             var running = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
             if (running && !running.isTerminated && running.activationPolicy === 0 &&
                 running.activateWithOptions($.NSApplicationActivateIgnoringOtherApps)) return 'yes';
-            try { pid = Number(app.doShellScript('/bin/ps -o ppid= -p ' + pid)); }
-            catch (_) { break; }
         }
         var ids = {Ghostty:'com.mitchellh.ghostty', kitty:'net.kovidgoyal.kitty', WezTerm:'com.github.wez.wezterm',
             Alacritty:'org.alacritty', iTerm:'com.googlecode.iterm2', Terminal:'com.apple.Terminal'};
+        if (!ids[argv[2]]) return 'no';
         var terminals = $.NSRunningApplication.runningApplicationsWithBundleIdentifier($(ids[argv[2]]));
         if (terminals.count > 0) terminals.objectAtIndex(0).activateWithOptions($.NSApplicationActivateIgnoringOtherApps);
         return 'yes';

@@ -4,6 +4,11 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 exe=$1 override=$2 terminal=$3
 shift 3
+app='' core=''
+if [ "${1:-}" = --herdr-app ]; then
+	app=$2 core=$3
+	shift 3
+fi
 [ "$#" -gt 0 ] || exit 2
 for file do
 	[ -f "$file" ] || exit 2
@@ -62,4 +67,4 @@ if [ "$status" -ne 0 ]; then
 	cat "$err" >&2
 	exit 1
 fi
-osascript -l JavaScript "$here/services.js" focus "$selected" "$terminal" >/dev/null 2>&1 || true
+osascript -l JavaScript "$here/services.js" focus "$selected" "$terminal" "$app" "$core" >/dev/null 2>&1 || true
