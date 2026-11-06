@@ -41,9 +41,18 @@ detect_terminal() {
 	elif [ -n "${ALACRITTY_WINDOW_ID:-}" ]; then
 		open_app=Alacritty open_args='-e'
 	fi
-	choice=${TTT_LAUNCHER_TERMINAL:-auto}
+	prefs=$(services preferences "$config" "$exe")
+	choice=${TTT_LAUNCHER_TERMINAL:-$(services preference "$prefs" terminal)}
+	fallback=$(services preference "$prefs" fallback)
+	herdr_mode=''
 	case $choice in
-	auto | herdr) ;; # Keep the detected terminal as Herdr's fallback.
+	herdr | herdr-app) herdr_mode=$choice ;;
+	auto) [ "${HERDR_ENV:-}" != 1 ] || herdr_mode=herdr ;;
+	esac
+	ordinary=$choice
+	[ -z "$herdr_mode" ] || ordinary=$fallback
+	case $ordinary in
+	auto) ;; # Keep the detected terminal as Herdr's fallback.
 	ghostty) open_app=Ghostty open_args='-e' ;;
 	kitty) open_app=kitty open_args='' ;;
 	wezterm) open_app=WezTerm open_args='start --' ;;
@@ -54,7 +63,7 @@ detect_terminal() {
 	if [ -n "$open_app" ]; then
 		terminal=$open_app
 		launch="do shell script \"open -na $open_app --args $open_args \" & cmd"
-	elif [ "$choice" = iterm ] || { [ "$choice" != terminal ] && [ "${TERM_PROGRAM:-}" = iTerm.app ]; }; then
+	elif [ "$ordinary" = iterm ] || { [ "$ordinary" != terminal ] && [ "${TERM_PROGRAM:-}" = iTerm.app ]; }; then
 		terminal=iTerm
 		launch='tell application "iTerm"
 		activate
@@ -67,9 +76,11 @@ detect_terminal() {
 	end tell'
 	fi
 	host_terminal=$terminal
-	if [ "$terminal" = Terminal ] && [ "${TERM_PROGRAM:-}" != Apple_Terminal ]; then host_terminal=''; fi
+	if [ "$terminal" = Terminal ] && [ "$ordinary" = auto ] && [ "${TERM_PROGRAM:-}" != Apple_Terminal ]; then host_terminal=''; fi
 	herdr_exe=''
-	if [ "$choice" = herdr ] || { [ "$choice" = auto ] && [ "${HERDR_ENV:-}" = 1 ]; }; then
+	herdr_app_exe=''
+	herdr_core_exe=''
+	if [ "$herdr_mode" = herdr ]; then
 		if herdr_exe=$(command -v herdr); then
 			# command -v may return a relative PATH entry; launchd needs absolute.
 			case $herdr_exe in /*) ;; *) herdr_exe="$PWD/$herdr_exe" ;; esac
@@ -80,6 +91,21 @@ detect_terminal() {
 	end try"
 		fi
 	fi
+	if [ "$herdr_mode" = herdr-app ]; then
+		herdr_app_exe=$(command -v herdr-app || true)
+		herdr_core_exe=$(command -v hc || true)
+		case $herdr_app_exe in '' | /*) ;; *) herdr_app_exe="$PWD/$herdr_app_exe" ;; esac
+		case $herdr_core_exe in '' | /*) ;; *) herdr_core_exe="$PWD/$herdr_core_exe" ;; esac
+		launch="try
+		do shell script \"/bin/sh \" & quoted form of POSIX path of (path to resource \"herdr.sh\") & \" herdr-app \" & quoted form of herdrAppExe & \" \" & quoted form of herdrCoreExe & \" \" & quoted form of cmd & \" \" & quoted form of firstPath
+	on error messageText number errorNumber
+		if errorNumber is 2 then
+			$launch
+		else
+			display notification messageText with title \"ttt: could not open files\"
+		end if
+	end try"
+	fi
 }
 
 applet() {
@@ -88,6 +114,9 @@ property tttExe : $(applescript_string "$exe")
 property configDir : $(applescript_string "$config")
 property terminalApp : $(applescript_string "$terminal")
 property terminalHost : $(applescript_string "$host_terminal")
+property herdrMode : $(applescript_string "$herdr_mode")
+property herdrAppExe : $(applescript_string "$herdr_app_exe")
+property herdrCoreExe : $(applescript_string "$herdr_core_exe")
 property herdrExe : $(applescript_string "$herdr_exe")
 
 on run

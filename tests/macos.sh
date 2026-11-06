@@ -16,10 +16,10 @@ const [script, ...args] = process.argv.slice(4);
 const state = fs.existsSync(process.env.TEST_STATE) ? JSON.parse(fs.readFileSync(process.env.TEST_STATE)) : {};
 const log = s => fs.appendFileSync(process.env.TEST_LOG, s + '\n');
 const wrap = js => ({js, get stringByStandardizingPath() {return wrap(path.normalize(js).replace(/^\/private\//, '/'));},
-    get stringByResolvingSymlinksInPath() {return wrap(fs.realpathSync(js));},
+    get stringByResolvingSymlinksInPath() {return wrap(fs.existsSync(js) ? fs.realpathSync(js) : path.resolve(js));},
     get stringByDeletingLastPathComponent() {return wrap(path.dirname(js));}});
 const $ = x => wrap(x);
-$.NSFileManager = {defaultManager:{currentDirectoryPath:wrap(process.cwd())}};
+$.NSFileManager = {defaultManager:{currentDirectoryPath:wrap(process.cwd()), fileExistsAtPath:p=>fs.existsSync(p.js)}};
 $.NSHomeDirectory = () => wrap(process.env.HOME);
 $.NSUTF8StringEncoding = 4; $.kLSRolesAll = -1;
 $.NSString = {stringWithContentsOfFileEncodingError(p) {try {return wrap(fs.readFileSync(p.js, 'utf8'));} catch (_) {return null;}}};
@@ -118,7 +118,7 @@ app=$tmp/home/Applications/TTT.app
 res=$app/Contents/Resources
 applet=$res/script.applescript
 fail() { echo "FAIL: $*" >&2; exit 1; }
-run() { env -u HERDR_ENV -u TTT_LAUNCHER_TERMINAL -u TTT_CONFIG_DIR -u KITTY_WINDOW_ID -u WEZTERM_PANE -u ALACRITTY_WINDOW_ID -u GHOSTTY_RESOURCES_DIR -u TERM_PROGRAM HOME="$tmp/home" PATH="$tmp/bin:$PATH" TMPDIR="$tmp/temp with spaces/" "$@"; }
+run() { env -u CODEX_HOME -u CLAUDE_CONFIG_DIR -u PI_CODING_AGENT_DIR -u HERDR_APP_HOME -u HC_SESSION -u HC_TERMINAL_ID -u HERDR_ENV -u TTT_LAUNCHER_TERMINAL -u TTT_CONFIG_DIR -u KITTY_WINDOW_ID -u WEZTERM_PANE -u ALACRITTY_WINDOW_ID -u GHOSTTY_RESOURCES_DIR -u TERM_PROGRAM HOME="$tmp/home" PATH="$tmp/bin:$PATH" TMPDIR="$tmp/temp with spaces/" "$@"; }
 service() { run osascript -l JavaScript "$root/desktop-launcher-macos/services.js" "$@"; }
 run sh "$script" install '/opt/my "apps"/ttt' "$tmp/config"
 grep -qF 'property tttExe : "/opt/my \"apps\"/ttt"' "$applet" || fail 'exe quoting'
@@ -164,6 +164,40 @@ grep -qF 'tell application "Terminal"' "$applet" || fail 'Herdr lost Terminal fa
 cp "$applet" "$tmp/before-invalid"
 if run env TTT_LAUNCHER_TERMINAL=invalid sh "$script" repair "$tmp/bin/ttt" 2>/dev/null; then fail 'invalid override accepted'; fi
 cmp "$tmp/before-invalid" "$applet" || fail 'invalid override replaced app'
+# Saved configuration wins over the host on Repair, and invalid input preserves the app.
+printf '{"terminal":"herdr-app","fallback":"ghostty"}' >"$tmp/config/desktop-launcher.json"
+run sh "$script" repair "$tmp/bin/ttt" "$tmp/config"
+grep -qF 'property herdrMode : "herdr-app"' "$applet" || fail 'saved Herdr.app choice ignored'
+grep -qF 'property terminalApp : "Ghostty"' "$applet" || fail 'saved fallback ignored'
+run env KITTY_WINDOW_ID=5 sh "$script" repair "$tmp/bin/ttt" "$tmp/config"
+grep -qF 'property herdrMode : "herdr-app"' "$applet" || fail 'Repair changed saved terminal'
+grep -qF 'property terminalApp : "Ghostty"' "$applet" || fail 'Repair changed saved fallback'
+run env TTT_LAUNCHER_TERMINAL=terminal sh "$script" repair "$tmp/bin/ttt" "$tmp/config"
+grep -qF 'property terminalApp : "Terminal"' "$applet" || fail 'environment override lost'
+for choice in auto herdr-app herdr ghostty kitty wezterm alacritty iterm terminal; do
+    printf '{"terminal":"%s"}' "$choice" >"$tmp/config/desktop-launcher.json"
+    [ "$(service preferences "$tmp/config" "$tmp/bin/ttt")" = "{\"terminal\":\"$choice\",\"fallback\":\"auto\"}" ] || fail "preference $choice"
+done
+for fallback in auto ghostty kitty wezterm alacritty iterm terminal; do
+    printf '{"fallback":"%s"}' "$fallback" >"$tmp/config/desktop-launcher.json"
+    service preferences "$tmp/config" "$tmp/bin/ttt" >/dev/null || fail "fallback $fallback"
+done
+cp "$applet" "$tmp/before-invalid"
+for json in invalid '[]' null '{"terminal":42}' '{"terminal":"bogus"}' '{"fallback":"herdr"}' '{"fallback":"herdr-app"}'; do
+    printf '%s' "$json" >"$tmp/config/desktop-launcher.json"
+    if run sh "$script" repair "$tmp/bin/ttt" "$tmp/config" 2>/dev/null; then fail "accepted preferences $json"; fi
+    cmp "$tmp/before-invalid" "$applet" || fail 'invalid preferences replaced app'
+done
+rm "$tmp/config/desktop-launcher.json"
+mkdir -p "$tmp/bin/config" "$tmp/home/.config/ttt"
+printf '{"terminal":"ghostty"}' >"$tmp/home/.config/ttt/desktop-launcher.json"
+[ "$(service preferences '' "$tmp/bin/ttt")" = '{"terminal":"ghostty","fallback":"auto"}' ] || fail 'home preference missed'
+printf '{}' >"$tmp/bin/config/settings.json"
+printf '{"terminal":"kitty"}' >"$tmp/bin/config/desktop-launcher.json"
+ln -s "$tmp/bin/ttt" "$tmp/preference-link"
+[ "$(service preferences '' "$tmp/preference-link")" = '{"terminal":"kitty","fallback":"auto"}' ] || fail 'sidecar preference missed'
+[ "$(service preferences "$tmp/config" "$tmp/bin/ttt")" = '{"terminal":"auto","fallback":"auto"}' ] || fail 'override searched other preferences'
+rm "$tmp/bin/config/settings.json" "$tmp/bin/config/desktop-launcher.json" "$tmp/home/.config/ttt/desktop-launcher.json"
 # Runtime boundary: exact cwd and command survive shell metacharacters, spaces
 # and newlines. No jq or shell evaluation of the Herdr reply is involved.
 mkdir -p "$tmp/a 'quoted' directory"

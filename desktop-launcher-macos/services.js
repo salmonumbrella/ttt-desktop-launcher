@@ -14,6 +14,26 @@ function absolute(path) {
     });
     return '/' + parts.join('/');
 }
+function configPaths(override, exe) {
+    return override ? [override] : [
+        $(exe).stringByResolvingSymlinksInPath.stringByDeletingLastPathComponent.js + '/config',
+        $.NSHomeDirectory().js + '/.config/ttt'];
+}
+function preferences(override, exe) {
+    var paths = configPaths(override, exe), dir = paths[paths.length - 1];
+    if (paths.length > 1 && $.NSFileManager.defaultManager.fileExistsAtPath($(paths[0] + '/settings.json'))) dir = paths[0];
+    var file = dir + '/desktop-launcher.json', value = {terminal:'auto', fallback:'auto'};
+    if ($.NSFileManager.defaultManager.fileExistsAtPath($(file))) {
+        value = JSON.parse(read(file));
+        if (!value || Array.isArray(value) || typeof value !== 'object') throw Error('invalid desktop-launcher.json');
+    }
+    var ordinary = ['auto', 'ghostty', 'kitty', 'wezterm', 'alacritty', 'iterm', 'terminal'];
+    var terminal = value.terminal === undefined ? 'auto' : value.terminal;
+    var fallback = value.fallback === undefined ? 'auto' : value.fallback;
+    if (ordinary.concat(['herdr', 'herdr-app']).indexOf(terminal) < 0 || ordinary.indexOf(fallback) < 0)
+        throw Error('invalid terminal or fallback in desktop-launcher.json');
+    return JSON.stringify({terminal:terminal, fallback:fallback});
+}
 function privateType(ext) {
     return 'io.github.simonocampo1.tttlauncher.code.' + ext.replace(/[^a-z0-9.]/g, function(c) {
         return '-' + c.charCodeAt(0).toString(16) + '-';
@@ -36,15 +56,15 @@ function typesFor(ext) {
 }
 function run(argv) {
     var mode = argv[0];
+    if (mode === 'preferences') return preferences(argv[1], argv[2]);
+    if (mode === 'preference') return JSON.parse(argv[1])[argv[2]];
     if (mode === 'herdr-pane') {
         var pane = JSON.parse(argv[1]).result.root_pane.pane_id;
         if (typeof pane !== 'string' || !pane) throw Error('invalid Herdr pane');
         return pane;
     }
     if (mode === 'reuse') {
-        var paths = argv[1] ? [argv[1]] : [
-            $(argv[2]).stringByResolvingSymlinksInPath.stringByDeletingLastPathComponent.js + '/config',
-            $.NSHomeDirectory().js + '/.config/ttt'];
+        var paths = configPaths(argv[1], argv[2]);
         for (var path of paths) {
             var value = $.NSString.stringWithContentsOfFileEncodingError($(path + '/settings.json'), $.NSUTF8StringEncoding, null);
             if (value) {
