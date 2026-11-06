@@ -160,6 +160,7 @@ applet=$res/script.applescript
 fail() { echo "FAIL: $*" >&2; exit 1; }
 run() { env -u CODEX_HOME -u CLAUDE_CONFIG_DIR -u PI_CODING_AGENT_DIR -u HERDR_APP_HOME -u HC_SESSION -u HC_TERMINAL_ID -u HERDR_ENV -u TTT_LAUNCHER_TERMINAL -u TTT_CONFIG_DIR -u KITTY_WINDOW_ID -u WEZTERM_PANE -u ALACRITTY_WINDOW_ID -u GHOSTTY_RESOURCES_DIR -u TERM_PROGRAM HOME="$tmp/home" PATH="$tmp/bin:$PATH" TMPDIR="$tmp/temp with spaces/" "$@"; }
 service() { run osascript -l JavaScript "$root/desktop-launcher-macos/services.js" "$@"; }
+node "$root/tests/macos-focus.js" "$root/desktop-launcher-macos/services.js"
 if [ "${TEST_ONLY_HERDR:-}" = 1 ]; then
     run python3 "$root/tests/macos-herdr.py" "$root" "$tmp"
     exit

@@ -120,7 +120,8 @@ function herdrFocus(exe, core, pids, deadline) {
                     var state = JSON.parse(result.text);
                     if (pids.indexOf(Number(state.pid)) < 0 && pids.indexOf(Number((state.foreground || {}).pid)) < 0) continue;
                 } catch (_) { continue; }
-                execute(exe, ['do', 'agent.focus', JSON.stringify({terminal:address})], deadline);
+                result = execute(exe, ['do', 'agent.focus', JSON.stringify({terminal:address})], deadline);
+                if (!result || result.status !== 0) return false;
                 execute('/usr/bin/open', ['-a', 'Herdr'], deadline);
                 return true;
             }
